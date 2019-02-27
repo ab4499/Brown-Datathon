@@ -1,0 +1,169 @@
+---
+title: "TripAdvisor"
+author: "Aidi Bian"
+date: "2/24/2019"
+output: html_document
+---
+
+Load libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+```{r}
+# read original data set
+activity<-read.csv("activity_data.csv", header=TRUE)
+hotel<-read.csv("hotel_data.csv", header=TRUE)
+```
+
+Prep data for clustering
+- cluster by "user_action" variable
+- count "clicks_action" by user id
+- spread "clicks_action" and counts
+- end goal: one row per user_id
+
+```{r}
+library(lubridate)
+DF <- left_join(activity,hotel,by="hotel_id")
+DF$date<-as_datetime(DF$date)
+training1<-filter(DF, date<=as_datetime("2019-1-20"))
+testing1<-filter(DF, date>as_datetime("2019-1-20"))
+```
+
+
+Import User Activity Data
+
+```{r}
+U.df <- training1 %>% group_by(user_id, user_action) %>% count() # count user_action
+U.df2 <- spread(U.df, user_action, n, fill=0) # spread user_action
+colnames(U.df2) <- c("user_id", "click_booking", "click_hotel_website", "click_price", "click_view") # rename columns
+#actClick2[duplicated(actClick2$user_id),] # check duplicate rows
+U.df3 <- ungroup(U.df2) %>% select(-user_id)
+```
+
+More Pre-Processing Steps - Scale Data
+```{r}
+U.df3 <- scale(U.df3)
+```
+
+Elbow Plot
+Source: https://www.r-bloggers.com/finding-optimal-number-of-clusters/
+
+```{r}
+#Elbow Method for finding the optimal number of clusters
+set.seed(123)
+# Compute and plot wss for k = 2 to k = 15.
+k.max <- 15
+data <- df3
+wss <- sapply(1:k.max, 
+              function(k){kmeans(data, k, nstart=50,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k.max, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+```
+
+Bayesian Inference Criterion for k means
+Source: https://www.r-bloggers.com/finding-optimal-number-of-clusters/
+
+```{r}
+library(mclust)
+d_clust <- Mclust(as.matrix(df3), G=1:15, 
+                  modelNames = mclust.options("emModelNames"))
+d_clust$BIC
+plot(d_clust)
+```
+
+# Build Recommender System models with different clusterings
+
+K-Means
+```{r}
+U.fit <- kmeans(U.df3, 5)
+``` 
+
+Data with fitted cluster
+```{r}
+U.df4 <- data.frame(U.df3, U.fit$cluster, U.df2$user_id)
+U.df4$total_clicks <- U.df4$click_booking + U.df4$click_hotel_website + U.df4$click_price
+# df4[!complete.cases(df4),] # check duplicates
+U.df5 <- select(U.df4, 5:7)
+uh <- select(activity, user_id, hotel_id)
+names(U.df5) <- c("ucluster", "user_id", "total_clicks")
+U.df6<-left_join(U.df5, uh, by="user_id")
+```
+
+
+```{r}
+H.df<-select(hotel, c("hotel_id", "star_rating","bubble_score", "review_count"))
+H.df<-H.df[!duplicated(H.df$hotel_id),]
+rownames(H.df)<-H.df$hotel_id
+H.df1<-H.df
+H.df1<-as.matrix(H.df1)
+H.df1[,-1]<-scale(H.df1[,-1])
+H.df1[is.na(H.df1)]<-0
+
+#Elbow Method for finding the optimal number of clusters
+set.seed(234)
+# Compute and plot wss for k = 2 to k = 15.
+k.max <- 15
+data <- H.df1
+wss <- sapply(1:k.max,
+            function(k){kmeans(data, k, nstart=50,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k.max, wss,
+   type="b", pch = 19, frame = FALSE,
+   xlab="Number of clusters K",
+   ylab="Total within-clusters sum of squares")
+```
+
+```{r}
+H.fit<-kmeans(H.df1[,-1], 3)
+H.df2 <- data.frame(H.df1, H.fit$cluster)
+names(H.df2)<-c("hotel_id","star_rating","bubble_score", "review_count", "hcluster")
+```
+
+
+```{r}
+# merge the two clusered dataset
+df1<-left_join(U.df6, H.df2, by="hotel_id")
+df2<-select(df1,ucluster,hcluster,total_clicks)
+df3<- df2 %>% group_by(ucluster,hcluster) %>% summarise(total_clicks=sum(total_clicks))
+df4<-spread(df3,hcluster,total_clicks)
+rownames(df4) <- df4$ucluster
+df4$ucluster<-NULL
+```
+
+```{r}
+library(lsa)
+df4<-as.matrix(df4)
+H.SIM <- cosine(df4)
+diag(H.SIM)<-NA
+```
+
+```{r}
+# test the similarity matrix with testing set
+a <- matrix(, nrow = 1, ncol=nrow(testing1))
+h <- select(H.df2,hotel_id,hcluster)
+testing1<-left_join(testing1, h, by="hotel_id")
+
+for (i in 1:nrow(testing1)) {
+  a[,i] <- head(rownames(H.SIM[order(H.SIM[testing1[i,15],], decreasing=TRUE),]),1)
+}
+
+u <- select(U.df6,user_id,ucluster)
+testing1<-left_join(testing1, u, by="user_id")
+
+testing1$hsim <- t(a)
+for (i in 1:nrow(testing1)) {
+  testing1$rec_user[i] <- which(df4[,testing1$hsim[i]]==max(df4[,testing1$hsim[i]]))
+}
+
+table(testing1$rec_user,testing1$ucluster)
+```
+
+
+
+
